@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+
+# Output / generated artifacts
+WEX/
+*.WEX
+*.xlsx
+*.xls
+
+# Reference assets
+開發用文件/*.PNG
+開發用文件/*.png
+
+# User data
+課表作息.json
+喜好設定.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+_tmp_*
+_tmp*.py
+_tmp*.txt
+*.bak
+*.log
