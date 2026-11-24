@@ -1,8 +1,8 @@
 """廣播時程編輯器（WSC3100 EDIT 相容介面）。
 
 用法：
-  python wex_editor.py                 # 自動找同資料夾第一個 .WEX
-  python wex_editor.py 檔案.WEX
+  python wex_editor.py                 # 啟動後手動匯入 .WEX
+  python wex_editor.py 檔案.WEX        # 指定要開啟的檔案
 """
 import json
 import os
@@ -109,6 +109,34 @@ def localize_sheet_menu(sheet):
             except Exception:
                 pass
 
+
+def configure_group_tab_style():
+    style = ttk.Style()
+    if "Schedule.tab" not in style.element_names():
+        style.element_create("Schedule.tab", "from", "clam", "Notebook.tab")
+    style.layout("Schedule.TNotebook.Tab", [
+        ("Schedule.tab", {"sticky": "nswe", "children": [
+            ("Notebook.padding", {"side": "top", "sticky": "nswe", "children": [
+                ("Notebook.focus", {"side": "top", "sticky": "nswe", "children": [
+                    ("Notebook.label", {"side": "top", "sticky": ""}),
+                ]}),
+            ]}),
+        ]}),
+    ])
+    style.configure("Schedule.TNotebook", background="#e8eff7", borderwidth=0)
+    style.configure(
+        "Schedule.TNotebook.Tab", font=("Microsoft JhengHei UI", 10, "bold"),
+        padding=(12, 8), background="#edf2f8", foreground="#34465a",
+        bordercolor="#afc1d3", lightcolor="#ffffff", darkcolor="#afc1d3")
+    style.map(
+        "Schedule.TNotebook.Tab",
+        background=[("selected", "#205e9c"), ("active", "#d4e5f6")],
+        foreground=[("selected", "#ffffff")],
+        bordercolor=[("selected", "#205e9c")],
+        lightcolor=[("selected", "#205e9c")],
+        darkcolor=[("selected", "#205e9c")])
+
+
 PERIOD_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "課表作息.json")
 PREFS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "喜好設定.json")
 DEFAULT_PERIODS = [
@@ -170,13 +198,110 @@ def parse_status(s):
     return 1 if s != "未排入" else 0
 
 
-class Workspace(ttk.Frame):
-    """單一工作區：工具列 + 鐘聲組別下拉 + 時程表格（主視窗可放多個）。"""
+class ScheduleImportDialog(simpledialog.Dialog):
+    def __init__(self, parent, groups, current_tab, new_id, max_name_units):
+        self.groups = groups
+        self.current_tab = current_tab
+        self.new_id = new_id
+        self.max_name_units = max_name_units
+        super().__init__(parent, title="選擇匯入目標")
 
-    def __init__(self, master, shell, compact=False):
+    def body(self, master):
+        self.mode = tk.StringVar(value="replace" if self.groups else "new")
+        self.new_name = tk.StringVar()
+        ttk.Label(master, text="選擇這次監考排程要寫入的鐘聲組別：").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        self.replace_radio = ttk.Radiobutton(
+            master, text="覆蓋既有工作表", variable=self.mode,
+            value="replace", command=self._update_controls)
+        self.replace_radio.grid(row=1, column=0, sticky="w", padx=(0, 8))
+        if not self.groups:
+            self.replace_radio.state(["disabled"])
+        self.group_combo = ttk.Combobox(
+            master, state="readonly", width=36,
+            values=[f"{sid}. {name}" for sid, name in self.groups])
+        self.group_combo.grid(row=1, column=1, sticky="ew", pady=4)
+        if self.groups:
+            ids = [sid for sid, _ in self.groups]
+            self.group_combo.current(ids.index(self.current_tab) if self.current_tab in ids else 0)
+        ttk.Label(master, text="覆蓋會取代該組全部原有時程，其他組別不受影響。",
+                  foreground="#8a4815").grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Radiobutton(master, text="新增工作表", variable=self.mode,
+                        value="new", command=self._update_controls).grid(
+            row=3, column=0, sticky="w", padx=(0, 8))
+        self.name_entry = ttk.Entry(master, textvariable=self.new_name, width=38)
+        self.name_entry.grid(row=3, column=1, sticky="ew", pady=4)
+        ttk.Label(master, text="輸入新工作表名稱；新增後需另行匯出 WEX。").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        if self.new_id > 8:
+            ttk.Label(master, foreground="#a23620", wraplength=480,
+                      text=f"新工作表將使用第 {self.new_id} 組；"
+                           "官方軟體是否支援第 9 組以上尚未確認。").grid(
+                row=5, column=0, columnspan=2, sticky="w")
+        master.columnconfigure(1, weight=1)
+        self._update_controls()
+        return self.group_combo if self.groups else self.name_entry
+
+    def _update_controls(self):
+        replacing = self.mode.get() == "replace"
+        self.group_combo.configure(state="readonly" if replacing else "disabled")
+        self.name_entry.configure(state="disabled" if replacing else "normal")
+
+    def buttonbox(self):
+        box = ttk.Frame(self)
+        ttk.Button(box, text="確定", command=self.ok).pack(side="left", padx=5, pady=5)
+        ttk.Button(box, text="取消", command=self.cancel).pack(side="left", padx=5, pady=5)
+        self.bind("<Return>", self.ok)
+        self.bind("<Escape>", self.cancel)
+        box.pack()
+
+    def validate(self):
+        if self.mode.get() == "replace":
+            index = self.group_combo.current()
+            if not 0 <= index < len(self.groups):
+                messagebox.showerror("請選擇工作表", "請選擇要覆蓋的鐘聲組別。", parent=self)
+                return False
+            sid, name = self.groups[index]
+            return messagebox.askyesno(
+                "確認覆蓋",
+                f"確定取代「{sid}. {name}」的全部時程？\n\n"
+                "包括尚未匯出的修改及已加入的學校作息；其他組別不受影響。",
+                parent=self)
+        name = self.new_name.get().strip()
+        if not name:
+            messagebox.showerror("缺少名稱", "請輸入新的工作表名稱。", parent=self)
+            return False
+        if len(name.encode("utf-16-le")) // 2 > self.max_name_units:
+            messagebox.showerror("名稱過長",
+                                 f"工作表名稱最多 {self.max_name_units} 個字元（部分特殊符號佔兩個）。",
+                                 parent=self)
+            return False
+        if any(name.casefold() == existing.strip().casefold() for _, existing in self.groups):
+            messagebox.showerror("名稱重複", "已有相同名稱的鐘聲組別，請使用其他名稱。", parent=self)
+            return False
+        if self.new_id > 8:
+            return messagebox.askyesno(
+                "官方相容性未確認",
+                f"新工作表將使用第 {self.new_id} 組。\n"
+                "官方控制軟體是否支援第 9 組以上尚未確認，可能無法顯示或匯入。\n\n"
+                "仍要新增嗎？", parent=self)
+        return True
+
+    def apply(self):
+        if self.mode.get() == "replace":
+            sid, name = self.groups[self.group_combo.current()]
+            self.result = ("replace", sid, name)
+        else:
+            self.result = ("new", self.new_id, self.new_name.get().strip())
+
+
+class Workspace(ttk.Frame):
+    """單一工作區：工具列、鐘聲組別頁籤與時程表格。"""
+
+    def __init__(self, master, shell):
         super().__init__(master)
         self.shell = shell
-        self.compact = compact
         self.proj = None
         self.path = None
         self.tab_rows = {}
@@ -191,14 +316,24 @@ class Workspace(ttk.Frame):
         self.detail_win = None
         self._detail_row = None
         self._period_win = None
-        self.embedded = False
 
-        if compact:
-            self.viewer = False
-            self._build_compact_bar()
-        else:
-            self.viewer = True
-            self._build_reference_bar()
+        self._build_toolbar()
+        ttk.Label(self, text="鐘聲時程組別  ·  點選切換，拖曳下方捲軸查看更多",
+                  font=("Microsoft JhengHei UI", 10, "bold"),
+                  foreground="#34465a").pack(anchor="w", padx=8, pady=(4, 3))
+        configure_group_tab_style()
+        self.tab_canvas = tk.Canvas(self, height=40, background="#e8eff7", highlightthickness=0)
+        self.tab_canvas.pack(fill="x", padx=6)
+        self.tab_scrollbar = ttk.Scrollbar(
+            self, orient="horizontal", command=self.tab_canvas.xview)
+        self.tab_scrollbar.pack(fill="x", padx=6)
+        self.tab_canvas.configure(xscrollcommand=self.tab_scrollbar.set)
+        self.group_tabs = ttk.Notebook(self.tab_canvas, style="Schedule.TNotebook")
+        self._tabs_window = self.tab_canvas.create_window(
+            0, 0, anchor="nw", window=self.group_tabs)
+        self.tab_canvas.bind("<Configure>", self._resize_group_tabs)
+        self._tab_ids = {}
+        self.group_tabs.bind("<<NotebookTabChanged>>", self._on_group_selected)
 
         self.sheet = Sheet(self, width=1040, height=560,
                            header_font=("Microsoft JhengHei UI", 10, "bold"),
@@ -209,15 +344,6 @@ class Workspace(ttk.Frame):
         self._apply_column_widths()
         self.sheet.enable_bindings()
         lock_sheet_format(self.sheet)
-        if self.viewer:
-            self.sheet.readonly()
-            try:
-                self.sheet.disable_bindings(
-                    "rc_insert_row", "insert_rows", "add_rows",
-                    "rc_delete_row", "delete_rows", "del_rows",
-                )
-            except Exception:
-                pass
         self.sheet.extra_bindings("end_edit_cell", self._on_cell_edited)
         self.sheet.extra_bindings("double_click", self._on_double_click)
 
@@ -229,28 +355,9 @@ class Workspace(ttk.Frame):
     def status(self):
         return self.shell.status
 
-    def _build_reference_bar(self):
-        """備用工作區：唯讀檢核列——只留組別切換（看資料用）。"""
-        grp_bar = ttk.Frame(self)
-        grp_bar.pack(fill="x", padx=6, pady=(0, 2))
-        ttk.Label(grp_bar, text="鐘聲組別:").pack(side="left")
-        self.var_group = tk.StringVar()
-        self.combo_group = ttk.Combobox(grp_bar, textvariable=self.var_group,
-                                        width=42, state="readonly")
-        self.combo_group.pack(side="left", padx=4)
-        self.combo_group.bind("<<ComboboxSelected>>", self._on_group_selected)
-        ttk.Label(grp_bar, text="｜唯讀交叉檢核（僅瀏覽官方資料，不提供編輯/匯出）",
-                  foreground="#888").pack(side="left", padx=8)
-
-    def _build_compact_bar(self):
+    def _build_toolbar(self):
         bar = ttk.Frame(self)
         bar.pack(fill="x", padx=6, pady=4)
-        ttk.Label(bar, text="鐘聲組別:").pack(side="left")
-        self.var_group = tk.StringVar()
-        self.group_entry = ttk.Entry(bar, textvariable=self.var_group, width=34)
-        self.group_entry.pack(side="left", padx=4)
-        self.group_entry.bind("<Return>", self._entry_return)
-        ttk.Button(bar, text="儲存", command=self.save_to_wex_folder).pack(side="left", padx=(0, 12))
         ttk.Button(bar, text="加入學校作息", command=self.embed_school_periods).pack(side="left", padx=(0, 12))
         ttk.Button(bar, text="匯入監考表排程", command=self.import_schedule_excel).pack(side="left", padx=(0, 4))
         ttk.Button(bar, text="條目整併", command=self.merge_entries).pack(side="left", padx=(0, 4))
@@ -332,163 +439,25 @@ class Workspace(ttk.Frame):
                 added += 1
             self.dirty.add(self.current_tab)
             self._reload_sheet()
-        self.embedded = True
         total = len(self.tab_rows.get(self.current_tab, []))
         if added:
             self.status.config(text=f"已加入學校作息（追加 {added} 節，共 {total} 列）")
         else:
             self.status.config(text=f"加入學校作息：節次皆已存在（共 {total} 列），未重複加入")
 
-    WEX_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "WEX")
-
-    def _ensure_base_loaded(self):
-        if self.proj is not None:
-            return True
-        base = find_default_wex()
-        if not base:
-            messagebox.showerror(
-                "找不到基底檔",
-                "鐘聲組別工作區是空白的，匯入/儲存需要一份原始 .WEX 作基底。\n"
-                "請確認 WEX官方原始檔 資料夾內有 .WEX 檔案。")
-            return False
-        self.load_path(base)
-        return self.proj is not None
-
-    def _ensure_proj_for_save(self):
-        """僅載入儲存所需的基底資料（proj/路徑/原始組名），不動現有編輯內容。"""
-        if self.proj is not None:
-            return True
-        base = find_default_wex()
-        if not base:
-            messagebox.showerror("找不到基底檔", "找不到原始 .WEX 作基底，無法儲存。\n請確認 WEX官方原始檔 資料夾。")
-            return False
-        self.path = base
-        self.proj = WexProject(base)
-        self.orig_tab_names = dict(self.proj.tab_names)
-        for idx, name, rows in self.proj.tabs:
-            if idx not in self.tab_rows:
-                self.tab_rows[idx] = [dict(r.data) for r in rows]
-                self.tab_names.setdefault(idx, name)
-                self.tab_deleted.setdefault(idx, False)
-                self.tab_new_seq.setdefault(idx, 0)
-            if idx not in self.visible and not self.tab_deleted.get(idx):
-                self.visible.append(idx)
-        self.visible.sort()
-        self._refresh_combo()
-        return True
-
-    def _entry_group_name(self):
-        text = (self.var_group.get() or "").strip()
-        if "." in text:
-            head, tail = text.split(".", 1)
-            if head.strip().isdigit():
-                text = tail.strip()
-        return text
-
-    def save_to_wex_folder(self):
-        text = self._entry_group_name()  # 先取：ensure 載基底時 _refresh_combo 會覆寫輸入框
-        self._commit_sheet_to_model()
-        if (not self.visible or self.current_tab is None) and self.proj is None:
-            messagebox.showinfo("提示", "請先「匯入監考表排程」，或在表格輸入時程內容")
-            return
-        if self.proj is None and not self._ensure_proj_for_save():
-            return
-        if not self.visible or self.current_tab is None:
-            messagebox.showinfo("提示", "目前沒有任何時程組")
-            return
-        cur_name = (self.tab_names.get(self.current_tab) or "").strip()
-        name = text or cur_name
-        if not name:
-            messagebox.showinfo("提示", "請先在「鐘聲組別」輸入名稱")
-            return
-        if name != cur_name:
-            self.tab_names[self.current_tab] = name
-            self.dirty.add(self.current_tab)
-        safe = re.sub(r'[\\/:*?"<>|]', "_", name).strip().rstrip(".")
-        if not safe:
-            messagebox.showinfo("提示", "名稱含有無效字元，請改用其他名稱")
-            return
-        os.makedirs(self.WEX_FOLDER, exist_ok=True)
-        target = os.path.join(self.WEX_FOLDER, safe + ".WEX")
-        if os.path.exists(target):
-            if not messagebox.askyesno(
-                    "檔案已存在",
-                    f"WEX\\{safe}.WEX 已存在。\n\n要覆蓋嗎？",
-                    parent=self.root):
-                self.status.config(text=f"已取消儲存（{safe}.WEX 已存在）")
-                return
-        try:
-            statements = self._build_statements()
-            src = self.path or find_default_wex()
-            if not src:
-                messagebox.showerror("儲存失敗", "找不到基底 .WEX 原始檔")
-                return
-            export_wex(src, target, statements)
-            self.dirty.clear()
-            self._refresh_combo()
-            self._reload_sheet()
-            self.status.config(text=f"已儲存: {target}（{len(statements)} 個變更）")
-            messagebox.showinfo(
-                "儲存完成",
-                f"已存入：\n{target}\n\n"
-                f"共 {len(statements)} 個資料庫變更。\n"
-                "可交由 WSC3100 主機匯入驗證。")
-        except Exception:
-            tb = traceback.format_exc()
-            messagebox.showerror("儲存失敗", tb[-1500:])
-
-    def _entry_return(self, event=None):
-        if not self.proj or self.current_tab is None:
-            return
-        text = (self.var_group.get() or "").strip()
-        if not text:
-            return
-
-        def norm(s):
-            return (s or "").strip().rstrip(".").strip()
-
-        if text.isdigit() and int(text) in self.visible:
-            self._switch_group(int(text))
-            return
-        if "." in text:
-            head, tail = text.split(".", 1)
-            if head.strip().isdigit() and int(head) in self.visible:
-                sid = int(head)
-                if norm(tail) == norm(self.tab_names.get(sid, "")):
-                    self._switch_group(sid)
-                    return
-        for sid in self.visible:
-            if sid != self.current_tab and norm(self.tab_names.get(sid, "")) == norm(text):
-                self._switch_group(sid)
-                return
-        self._save_group_name()
-
     def _switch_group(self, sid):
         if sid == self.current_tab:
             return
         self._commit_sheet_to_model()
         self.current_tab = sid
-        self._refresh_combo()
         self._reload_sheet()
         self.status.config(text=f"已切換到「{sid}.{self.tab_names.get(sid, '')}」")
 
-    def _save_group_name(self):
-        if not self.proj or self.current_tab is None:
-            return
-        text = (self.var_group.get() or "").strip()
-        if "." in text:
-            head, tail = text.split(".", 1)
-            if head.strip().isdigit():
-                text = tail.strip()
-        if not text or text == self.tab_names.get(self.current_tab):
-            return
-        self.tab_names[self.current_tab] = text
-        self.dirty.add(self.current_tab)
-        self._refresh_combo()
-        self.status.config(text=f"已儲存組名「{text}」（匯出時寫入檔案）")
-
     def import_schedule_excel(self):
-        fresh = self.proj is None
+        if self.proj is None:
+            messagebox.showinfo("請先匯入 WEX",
+                                "請先使用「匯入舊WEX檔」選擇包含音檔與鐘聲組別的完整 WEX。")
+            return
         path = filedialog.askopenfilename(
             title="匯入監考表排程",
             filetypes=[("Excel 檔 (*.xlsx;*.xls)", "*.xlsx *.xls"), ("所有檔案", "*.*")],
@@ -511,29 +480,42 @@ class Workspace(ttk.Frame):
             if not new_rows:
                 messagebox.showinfo("匯入監考表排程", "試算表中沒有可匯入的時程列。")
                 return
-            old_n = 0
-            if self.current_tab is None:
-                self._create_group_from_rows(new_rows)
-                old_n = 0
-            else:
-                rows = self.tab_rows.setdefault(self.current_tab, [])
-                old_n = len(rows)
-                next_no = max((int(r.get("Music_no") or 0) for r in rows), default=0)
-                for d in new_rows:
-                    next_no += 1
-                    d["Music_no"] = next_no
-                rows.extend(new_rows)
-                self.dirty.add(self.current_tab)
-            self.tab_new_seq[self.current_tab] = -1
-            self.dirty.add(self.current_tab)
+            missing = sorted({str(d.get("Dir0") or "") for d in new_rows} - set(self.proj.audio_files))
+            if missing:
+                raise ValueError("所選 WEX 缺少排程需要的音檔：\n" + "\n".join(missing))
+
+            groups = [(sid, self.tab_names.get(sid, "")) for sid in self.visible]
+            new_id = next(i for i in range(1, max(self.visible, default=0) + 2)
+                          if i not in self.visible)
+            music_table = self.proj.db.read_table(self.proj._catalog["MUSIC"])
+            self.proj.db.read_columns(music_table)
+            name_column = next(c for c in music_table.columns if c.name == "Music_name")
+            dialog = ScheduleImportDialog(
+                self.root, groups, self.current_tab, new_id, name_column.col_size // 2)
+            if dialog.result is None:
+                return
+            mode, sid, name = dialog.result
+            self._commit_sheet_to_model()
+            old_n = len(self.tab_rows.get(sid, []))
+            for i, d in enumerate(new_rows, 1):
+                d["MUSIC"] = -i
+                d["Music_no"] = i
+            self.tab_rows[sid] = new_rows
+            self.tab_names[sid] = name
+            self.tab_deleted[sid] = False
+            self.tab_backup.pop(sid, None)
+            self.tab_new_seq[sid] = -len(new_rows)
+            if sid not in self.visible:
+                self.visible.append(sid)
+                self.visible.sort()
+            self.current_tab = sid
+            self.dirty.add(sid)
+            self._refresh_group_tabs()
             self._reload_sheet()
-            if fresh and self.tab_names.get(self.current_tab) == "新時程組":
-                self.var_group.set("")
-            shift_note = "，已套用加入學校作息 +1 分鐘" if self._import_shift_minutes() else ""
-            total = len(self.tab_rows.get(self.current_tab, []))
+            self.after_idle(self._show_selected_group_tab)
             self.status.config(
-                text=f"已匯入監考表排程（{source}，追加）: {os.path.basename(path)}"
-                     f"（+{len(new_rows)} 列，{old_n} → {total}{shift_note}） | 輸入名稱後按「儲存」")
+                text=f"已匯入監考表排程（{source}，{'覆蓋' if mode == 'replace' else '新增'}）："
+                     f"{sid}.{name}（{old_n} → {len(new_rows)} 列）；請確認後匯出 WEX")
             if self._pref_auto_merge():
                 self.merge_entries(auto=True)
         except ValueError as e:
@@ -577,11 +559,14 @@ class Workspace(ttk.Frame):
             if parsed is None:
                 continue
             _, rest = parsed
+            date = tuple(int(d.get(col) or 0) for col in ("Clock_year", "Clock_month", "Clock_day"))
+            if date == NO_DATE or date[0] == 0:
+                date = None
             key = (rest,
                    int(d.get("Clock_start_hour") or 0), int(d.get("Clock_start_min") or 0),
                    int(d.get("Total_time") or 0), str(d.get("Dir0") or ""),
                    int(d.get("Group1") or 0), int(d.get("Group2") or 0), int(d.get("Group3") or 0),
-                   bool(d.get("Allcall")), int(d.get("Vol") or 0))
+                   bool(d.get("Allcall")), int(d.get("Vol") or 0), date)
             groups.setdefault(key, []).append((idx, parsed[0], d))
 
         drop = set()
@@ -629,9 +614,6 @@ class Workspace(ttk.Frame):
         self._reload_sheet()
         self.status.config(
             text=f"條目整併：合併 {merged_n} 組、移除 {removed} 列（{before} → {len(rows)} 列）")
-
-    def _import_shift_minutes(self):
-        return bool(getattr(self, "embedded", False))
 
     FALLBACK_AUDIO_DUR = {
         "上課.wav": 53.0, "下課.wav": 55.0,
@@ -759,7 +741,6 @@ class Workspace(ttk.Frame):
         week_filled = self._invig_ffill(grid[r_week], ncols) if r_week is not None else None
 
         year = self._guess_exam_year(path, grid)
-        shift = 1 if self._import_shift_minutes() else 0
         write_date = self._pref_import_write_date()
 
         hay = os.path.basename(path) + " " + " ".join(s(c) for c in grid[0])
@@ -836,7 +817,7 @@ class Workspace(ttk.Frame):
                 hm = self._invig_to_hm(grid[rws][c] if c < len(grid[rws]) else None)
                 if hm is None:
                     continue
-                total_min = hm[0] * 60 + hm[1] + shift
+                total_min = hm[0] * 60 + hm[1]
                 sh, sm = divmod(total_min, 60)
                 sh %= 24
                 seq += 1
@@ -874,10 +855,7 @@ class Workspace(ttk.Frame):
         )
         if not path:
             return
-        self.load_path(path)
-        if self.proj is not None:
-            self.status.config(
-                text=f"已匯入舊WEX: {path} | 輸入新名稱按「儲存」可另存到 WEX 資料夾")
+        self.shell.open_path(path)
 
     def clear_workspace(self):
         self.proj = None
@@ -899,19 +877,12 @@ class Workspace(ttk.Frame):
             except Exception:
                 pass
             self.detail_win = None
-        self.var_group.set("")
-        self.embedded = False
+        self._refresh_group_tabs()
         self._reload_sheet()
         self.status.config(
-            text="新鐘聲組別：工作區已清空 — 「匯入監考表排程」或「匯入舊WEX檔」→ "
-                 "輸入名稱 → 按「儲存」存入 WEX 資料夾")
+            text="工作區已清空 — 請匯入 WEX 檔，再編輯或匯入排程")
 
     def open_detail_dialog(self, r=None):
-        if getattr(self, "viewer", False):
-            messagebox.showinfo("備用工作區",
-                                "備用工作區為唯讀交叉檢核用，不提供編輯。\n"
-                                "請切到「鐘聲組別工作區」操作。")
-            return
         if r is None:
             try:
                 r = self.sheet.get_currently_selected()[0].row
@@ -1002,6 +973,7 @@ class Workspace(ttk.Frame):
             self.status.config(text=f"載入中: {path}")
             self.root.update_idletasks()
             proj = WexProject(path)
+            tabs = proj.tabs
             self.proj = proj
             self.path = path
             self.tab_rows = {}
@@ -1012,66 +984,83 @@ class Workspace(ttk.Frame):
             self.orig_tab_names = dict(proj.tab_names)
             self.visible = []
             self.dirty = set()
-            for idx, name, rows in proj.tabs:
+            for idx, name, rows in tabs:
                 self.tab_rows[idx] = [dict(r.data) for r in rows]
                 self.tab_new_seq[idx] = 0
                 self.tab_names[idx] = name
                 self.tab_deleted[idx] = False
                 self.visible.append(idx)
             self.current_tab = self.visible[0] if self.visible else None
-            self._refresh_combo()
+            self._refresh_group_tabs()
             self._reload_sheet()
             if hasattr(self, "file_label"):
                 self.file_label.config(text=os.path.basename(path))
             total = sum(len(v) for v in self.tab_rows.values())
-            if self.compact:
-                self.status.config(
-                    text=f"{path} | {len(self.visible)} 組鐘聲, 共 {total} 列 | "
-                         "輸入組號(如3)或名稱後按 Enter 切組、按「儲存」改名、雙擊列設定音檔")
-            else:
-                self.status.config(text=f"{path} | {len(self.visible)} 組鐘聲, 共 {total} 列 | 雙擊列可設定音檔/群組")
+            self.status.config(
+                text=f"{path} | {len(self.visible)} 組鐘聲, 共 {total} 列 | "
+                     "點選頁籤切換組別，雙擊列可設定音檔/群組")
+            self.shell.update_title()
+            return True
         except Exception:
             tb = traceback.format_exc()
             messagebox.showerror("載入失敗", tb[-1500:])
             self.status.config(text="載入失敗")
+            return False
 
-    def _refresh_combo(self, select=None):
+    def _refresh_group_tabs(self, select=None):
         if select is None:
             select = self.current_tab
         if select not in self.visible:
             select = self.visible[0] if self.visible else None
-        if select is not None:
-            self.current_tab = select
-        if self.compact:
-            if self.current_tab is not None:
-                self.var_group.set(f"{self.current_tab}.{self.tab_names.get(self.current_tab, '')}")
-            else:
-                self.var_group.set("")
+        self.current_tab = select
+        for tab in self.group_tabs.tabs():
+            self.group_tabs.nametowidget(tab).destroy()
+        self._tab_ids = {}
+        for sid in self.visible:
+            frame = ttk.Frame(self.group_tabs, height=1)
+            self.group_tabs.add(frame, text=f"{sid}.{self.tab_names.get(sid, '')}")
+            self._tab_ids[str(frame)] = sid
+            if sid == select:
+                self.group_tabs.select(frame)
+        self.after_idle(self._resize_group_tabs)
+
+    def _resize_group_tabs(self, event=None):
+        width = max(self.tab_canvas.winfo_width(), self.group_tabs.winfo_reqwidth())
+        height = self.group_tabs.winfo_reqheight()
+        self.tab_canvas.itemconfigure(self._tabs_window, width=width, height=height)
+        self.tab_canvas.configure(height=height, scrollregion=(0, 0, width, height))
+
+    def _show_selected_group_tab(self):
+        selected = self.group_tabs.select()
+        if not selected:
             return
-        vals = [f"{sid}.{self.tab_names.get(sid, '')}" for sid in self.visible]
-        self.combo_group["values"] = vals
-        if self.current_tab in self.visible:
-            idx = self.visible.index(self.current_tab)
-            self.combo_group.current(idx)
-            self.var_group.set(vals[idx])
-        elif self.visible:
-            self.combo_group.current(0)
-            self.var_group.set(vals[0])
-        else:
-            self.combo_group.set("")
-            self.current_tab = None
+        index = self.group_tabs.index(selected)
+        width = self.group_tabs.winfo_width()
+        start = end = None
+        for x in range(width):
+            try:
+                matches = self.group_tabs.index(f"@{x},10") == index
+            except tk.TclError:
+                matches = False
+            if matches:
+                if start is None:
+                    start = x
+                end = x + 1
+            elif start is not None:
+                break
+        if start is None:
+            return
+        left = self.tab_canvas.canvasx(0)
+        visible_width = self.tab_canvas.winfo_width()
+        if start < left:
+            self.tab_canvas.xview_moveto(start / width)
+        elif end > left + visible_width:
+            self.tab_canvas.xview_moveto(max(start, end - visible_width) / width)
 
     def _on_group_selected(self, event=None):
-        idx = self.combo_group.current()
-        if idx < 0 or idx >= len(self.visible):
-            return
-        sid = self.visible[idx]
-        if sid == self.current_tab:
-            return
-        self._commit_sheet_to_model()
-        self.current_tab = sid
-        self.var_group.set(self.combo_group["values"][idx])
-        self._reload_sheet()
+        sid = self._tab_ids.get(self.group_tabs.select())
+        if sid is not None:
+            self._switch_group(sid)
 
     def _rename_current_group(self):
         if not self.proj or self.current_tab is None:
@@ -1087,7 +1076,7 @@ class Workspace(ttk.Frame):
             return
         self.tab_names[sid] = name
         self.dirty.add(sid)
-        self._refresh_combo()
+        self._refresh_group_tabs()
         self.status.config(text=f"已改名為「{name}」（匯出時寫入檔案）")
 
     def _delete_current_group(self):
@@ -1112,7 +1101,7 @@ class Workspace(ttk.Frame):
         self.visible.remove(sid)
         self.dirty.add(sid)
         self.current_tab = self.visible[min(pos, len(self.visible) - 1)]
-        self._refresh_combo()
+        self._refresh_group_tabs()
         self._reload_sheet()
         self.status.config(text=f"已刪除「{sid}」（匯出時生效，可由「新增組」復原）")
 
@@ -1140,7 +1129,7 @@ class Workspace(ttk.Frame):
         self._commit_sheet_to_model()
         self.current_tab = sid
         self.dirty.add(sid)
-        self._refresh_combo()
+        self._refresh_group_tabs()
         self._reload_sheet()
         self.status.config(text=f"已新增「{sid}.{self.tab_names[sid]}」")
 
@@ -1223,8 +1212,6 @@ class Workspace(ttk.Frame):
                              values=["已排入時程", "未排入"], state="readonly")
         self.sheet.dropdown((0, COL_MODE, len(data), COL_MODE),
                             values=list(MODE_LABELS.values()), state="readonly")
-        if getattr(self, "viewer", False):
-            self.sheet.readonly()
         self._detail_row = None
 
     def _on_cell_edited(self, event=None):
@@ -1303,7 +1290,7 @@ class Workspace(ttk.Frame):
 
     def _create_group_from_rows(self, rows):
         sid = 1
-        name = self._entry_group_name() or "新時程組"
+        name = "新時程組"
         for i, d in enumerate(rows, start=1):
             d["Music_no"] = i
         self.tab_names[sid] = name
@@ -1315,7 +1302,7 @@ class Workspace(ttk.Frame):
             self.visible.sort()
         self.current_tab = sid
         self.dirty.add(sid)
-        self._refresh_combo()
+        self._refresh_group_tabs()
 
     def _commit_sheet_to_model(self):
         if getattr(self, "sheet", None) is None:
@@ -1326,6 +1313,8 @@ class Workspace(ttk.Frame):
             return
         if not isinstance(data, list):
             return
+        if self.current_tab is not None and self._has_unsaved_changes():
+            self.dirty.add(self.current_tab)
         if self.current_tab is None:
             rows = [self._row_dict_from_grid(row, i + 1)
                     for i, row in enumerate(self._meaningful_sheet_rows(data))]
@@ -1378,6 +1367,8 @@ class Workspace(ttk.Frame):
                 return True
         else:
             model = self.tab_rows[self.current_tab]
+            if not model and not self._meaningful_sheet_rows(data):
+                return False
             if len(data) != len(model):
                 return True
             for r, d in enumerate(model):
@@ -1386,13 +1377,6 @@ class Workspace(ttk.Frame):
                 if [self._norm_cell(v) for v in self._row_to_grid(d)] != \
                         [self._norm_cell(v) for v in data[r]]:
                     return True
-        if self.compact:
-            text = (self.var_group.get() or "").strip()
-            expected = ""
-            if self.current_tab is not None:
-                expected = f"{self.current_tab}.{self.tab_names.get(self.current_tab, '')}"
-            if text and text != expected:
-                return True
         return False
 
     def _detail_changed(self):
@@ -1972,20 +1956,13 @@ class Workspace(ttk.Frame):
         return out
 
     def export_dialog(self):
-        if getattr(self, "viewer", False):
-            messagebox.showinfo("備用工作區",
-                                "備用工作區為唯讀交叉檢核用，不提供匯出。\n"
-                                "請切到「鐘聲組別工作區」匯出。")
-            return
         self._commit_sheet_to_model()
-        if (not self.visible or self.current_tab is None) and self.proj is None:
-            messagebox.showinfo("提示", "請先「匯入監考表排程」，或在表格輸入時程內容")
-            return
-        if self.proj is None and not self._ensure_proj_for_save():
-            return
+        if self.proj is None:
+            messagebox.showerror("無法匯出", "請先使用「匯入舊WEX檔」選擇完整的 WEX 檔案。")
+            return False
         if not self.visible or self.current_tab is None:
             messagebox.showinfo("提示", "目前沒有任何時程組")
-            return
+            return False
         path = filedialog.asksaveasfilename(
             title="匯出 .WEX",
             defaultextension=".WEX",
@@ -1993,14 +1970,14 @@ class Workspace(ttk.Frame):
             initialfile=os.path.splitext(os.path.basename(self.path))[0] + "_修改.WEX",
         )
         if not path:
-            return
+            return False
         try:
             statements = self._build_statements()
             if not statements:
                 messagebox.showinfo("無變更", "沒有偵測到變更，仍可匯出完整副本")
             export_wex(self.path, path, statements)
             self.dirty.clear()
-            self._refresh_combo()
+            self._refresh_group_tabs()
             self._reload_sheet()
             extra_slots = [i for i in self.visible if i > 8 and not self.tab_deleted.get(i)]
             extra_note = ""
@@ -2013,9 +1990,11 @@ class Workspace(ttk.Frame):
                                 f"已產生：\n{path}\n\n"
                                 f"共 {len(statements)} 個資料庫變更。{extra_note}\n\n"
                                 "請交由 WSC3100 主機匯入驗證。")
+            return True
         except Exception:
             tb = traceback.format_exc()
             messagebox.showerror("匯出失敗", tb[-1500:])
+            return False
 
     def _build_statements(self):
         proj = self.proj
@@ -2031,6 +2010,8 @@ class Workspace(ttk.Frame):
             rows = [] if deleted else self.tab_rows.get(idx, [])
             table_existed = table in proj._catalog
             orig = {r.music_id: r.data for r in proj.load_rows(table)} if table_existed else {}
+            is_mirror = mirror == table
+            schedule_changed = False
             if not table_existed and not deleted and rows:
                 statements.append(f"SELECT * INTO [{table}] FROM [{template_table}] WHERE 1=0")
             seen_ids = set()
@@ -2042,11 +2023,17 @@ class Workspace(ttk.Frame):
                     changes = self._diff(orig[mid], d, proj)
                     if changes:
                         statements.append(build_update_row(table, mid, changes))
+                        if is_mirror:
+                            statements.append(build_update_row("MUSIC_T", mid, changes))
+                        schedule_changed = True
                 else:
                     new_rows.append(d)
             for mid in orig:
                 if mid not in seen_ids:
                     statements.append(build_delete_row(table, mid))
+                    if is_mirror:
+                        statements.append(build_delete_row("MUSIC_T", mid))
+                    schedule_changed = True
             next_id = None
             for d in new_rows:
                 row_data = dict(d)
@@ -2057,21 +2044,12 @@ class Workspace(ttk.Frame):
                 row_data["Music_no"] = int(row_data.get("Music_no") or 0)
                 row_data.update(row_duration_changes(row_data, proj.audio_durations))
                 statements.append(build_insert_row(table, row_data))
-            if any(
-                    orig[mid] != d for mid, d in
-                    ((m, next((x for x in rows if int(x.get("MUSIC") or 0) == m), {})) for m in orig) if d):
+                if is_mirror:
+                    statements.append(build_insert_row("MUSIC_T", row_data))
+                schedule_changed = True
+            if schedule_changed and idx <= 8:
                 stamp = f"'{datetime.now():%Y/%m/%d %H:%M:%S}'"
-                if idx <= 8:
-                    statements.append(f"UPDATE [SETTING] SET [Up_music{idx}] = {stamp}")
-                else:
-                    statements.append(f"UPDATE [SETTING] SET [Up_music] = {stamp}")
-            if mirror and mirror.get("table") == table and not deleted:
-                for d in rows:
-                    mid = int(d.get("MUSIC") or 0)
-                    if mid in mirror["ids"] and mid in orig:
-                        changes = self._diff(orig[mid], d, proj)
-                        if changes:
-                            statements.append(build_update_row("MUSIC_T", mid, changes))
+                statements.append(f"UPDATE [SETTING] SET [Up_music{idx}] = {stamp}")
             old_name = (proj.tab_names.get(idx) or "").strip()
             new_name = "" if deleted else (self.tab_names.get(idx) or "").strip()
             if old_name != new_name:
@@ -2084,22 +2062,23 @@ class Workspace(ttk.Frame):
                 name_changed = True
         if name_changed:
             statements.append(
-                f"UPDATE [SETTING] SET [Up_page] = '{datetime.now():%Y/%m/%d %H:%M:%S}'")
+                f"UPDATE [SETTING] SET [Up_music] = '{datetime.now():%Y/%m/%d %H:%M:%S}'")
         return statements
 
     def _music_t_mirror(self):
-        try:
-            mt_rows = self.proj.load_rows("MUSIC_T")
-        except Exception:
+        if "MUSIC_T" not in self.proj._catalog:
             return None
+        mt_rows = self.proj.load_rows("MUSIC_T")
         if not mt_rows:
             return None
-        mt_ids = {r.music_id for r in mt_rows}
+        mirror_rows = {r.music_id: r.data for r in mt_rows}
+        matches = []
         for idx in range(1, 9):
-            ids = {r.music_id for r in self.proj.load_rows(f"MUSIC{idx}")}
-            if ids and ids == mt_ids:
-                return {"table": f"MUSIC{idx}", "ids": mt_ids}
-        return None
+            table = f"MUSIC{idx}"
+            rows = {r.music_id: r.data for r in self.proj.load_rows(table)}
+            if rows == mirror_rows:
+                matches.append(table)
+        return matches[0] if len(matches) == 1 else None
 
     def _diff(self, orig, cur, proj):
         changes = {}
@@ -2152,7 +2131,7 @@ class Workspace(ttk.Frame):
 
 
 class EditorApp:
-    """主視窗：選單 + 兩個工作區頁籤 + 狀態列。"""
+    """主視窗：選單、工作區與狀態列。"""
 
     def __init__(self, root, initial_path=None):
         self.root = root
@@ -2179,116 +2158,53 @@ class EditorApp:
         root.config(menu=menubar)
 
         self.status = ttk.Label(root, anchor="w", relief="sunken",
-                                text="鐘聲組別工作區：空白開始（匯入監考表排程 → 輸入名稱 → 儲存）｜ 備用工作區：官方原始檔參考")
+                                text="請按「匯入舊WEX檔」選擇完整的 WEX 檔案")
         self.status.pack(fill="x", side="bottom")
 
-        self.notebook = ttk.Notebook(root)
-        self.notebook.pack(fill="both", expand=True, padx=6, pady=(0, 2))
-        self.workspaces = []
-        for label, compact in (("鐘聲組別工作區", True), ("備用工作區", False)):
-            ws = Workspace(self.notebook, self, compact=compact)
-            self.notebook.add(ws, text=label)
-            self.workspaces.append(ws)
-        self.notebook.bind("<<NotebookTabChanged>>", self._on_ws_changed)
-        try:
-            self.workspaces[0].var_group.trace_add("write", lambda *_: self._update_window_title())
-        except Exception:
-            pass
-        self._update_window_title()
+        self.active_workspace = Workspace(root, self)
+        self.active_workspace.pack(fill="both", expand=True, padx=6, pady=(0, 2))
 
         root.bind("<Control-o>", lambda e: self.open_dialog())
         root.bind("<Control-s>", lambda e: self.export_dialog())
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         if initial_path:
-            root.after(100, lambda: self.workspaces[1].load_path(initial_path))
+            root.after(100, lambda: self.open_path(initial_path))
 
     def _confirm_discard_changes(self, action_label):
         """有未儲存修改時詢問；回傳 True = 可繼續動作。"""
-        ws = self.workspaces[0]
+        ws = self.active_workspace
         if not ws._has_unsaved_changes():
             return True
         ans = messagebox.askyesnocancel(
             "未儲存的修改",
-            f"「鐘聲組別工作區」有尚未儲存的修改。\n\n"
-            f"要先儲存到 WEX 資料夾嗎？\n\n"
-            f"是：儲存後{action_label}\n"
+            f"目前有尚未匯出的修改。\n\n"
+            f"要先匯出 WEX 嗎？\n\n"
+            f"是：匯出後{action_label}\n"
             f"否：放棄修改並{action_label}\n"
             f"取消：返回程式",
             parent=self.root)
         if ans is None:
             return False
-        if ans:
-            ws.save_to_wex_folder()
-            if ws._has_unsaved_changes():
-                return False
+        if ans and not ws.export_dialog():
+            return False
         return True
 
     def on_close(self):
-        for job in getattr(self, "_focus_jobs", []):
-            try:
-                self.root.after_cancel(job)
-            except Exception:
-                pass
-        self._focus_jobs = []
         if not self._confirm_discard_changes("關閉"):
             return
         self.root.destroy()
 
-    def _update_window_title(self):
-        """視窗標題 = 鐘聲組別工作區輸入框的名稱（不含組號前綴），讓使用者視為正在編修的檔名。"""
-        try:
-            text = (self.workspaces[0].var_group.get() or "").strip()
-        except Exception:
-            text = ""
-        if "." in text:
-            head, tail = text.split(".", 1)
-            if head.strip().isdigit():
-                text = tail.strip()
+    def update_title(self):
+        path = self.active_workspace.path
         base = "廣播時程編輯器"
-        try:
-            self.root.title(f"{base} - {text}" if text else base)
-        except Exception:
-            pass
-
-    def _on_ws_changed(self, event=None):
-        try:
-            ws = self.active_workspace
-        except Exception:
-            return
-        if ws.proj is None:
-            self.status.config(
-                text="鐘聲組別工作區：空白開始 — 按「匯入監考表排程」載入 Excel → "
-                     "「鐘聲組別」輸入名稱 → 按「儲存」存入 WEX 資料夾")
-
-    @property
-    def active_workspace(self):
-        return self.workspaces[self.notebook.index("current")]
+        self.root.title(f"{base} - {os.path.basename(path)}" if path else base)
 
     def new_bell_group(self):
         if not self._confirm_discard_changes("清空"):
             return
-        self.notebook.select(0)
-        ws = self.workspaces[0]
-        ws.clear_workspace()
-        ws.group_entry.focus_set()
-        try:
-            ws.group_entry.select_range(0, "end")
-        except Exception:
-            pass
-        self._focus_jobs = [
-            self.root.after(80, self._refocus_group_entry),
-            self.root.after(300, self._refocus_group_entry),
-        ]
-
-    def _refocus_group_entry(self):
-        ws = self.workspaces[0]
-        try:
-            if self.notebook.index("current") == 0 and ws.group_entry.winfo_exists():
-                ws.group_entry.focus_force()
-                ws.group_entry.select_range(0, "end")
-        except Exception:
-            pass
+        self.active_workspace.clear_workspace()
+        self.update_title()
 
     def open_dialog(self):
         path = filedialog.askopenfilename(
@@ -2299,36 +2215,12 @@ class EditorApp:
             self.open_path(path)
 
     def open_path(self, path):
-        self.active_workspace.load_path(path)
+        if self._confirm_discard_changes("開啟其他檔案"):
+            return self.active_workspace.load_path(path)
+        return False
 
     def export_dialog(self):
-        self.active_workspace.export_dialog()
-
-
-def find_default_wex():
-    d = os.path.dirname(os.path.abspath(__file__))
-    skip_dirs = {"WEX", "__pycache__"}
-    search_dirs = [d]
-    try:
-        search_dirs += sorted(
-            os.path.join(d, e) for e in os.listdir(d)
-            if os.path.isdir(os.path.join(d, e)) and not e.startswith("__")
-            and e not in skip_dirs
-        )
-    except OSError:
-        pass
-    cwd = os.path.abspath(".")
-    if cwd not in search_dirs:
-        search_dirs.append(cwd)
-    for search in search_dirs:
-        try:
-            cands = sorted(p for p in os.listdir(search)
-                           if p.upper().endswith(".WEX") and not p.startswith("_"))
-        except OSError:
-            continue
-        if cands:
-            return os.path.join(search, cands[0])
-    return None
+        return self.active_workspace.export_dialog()
 
 
 def main():
@@ -2337,7 +2229,7 @@ def main():
     parser.add_argument("path", nargs="?")
     args = parser.parse_args()
     root = tk.Tk()
-    EditorApp(root, initial_path=args.path or find_default_wex())
+    EditorApp(root, initial_path=args.path)
     root.mainloop()
 
 

@@ -472,12 +472,33 @@ class JetDatabase:
                 parts.append(seg.decode("cp950", errors="replace"))
         return "".join(parts)
 
+    @staticmethod
+    def _decode_compressed_unicode(body):
+        decoded = bytearray()
+        compressed = True
+        pos = 0
+        while pos < len(body):
+            if body[pos] == 0:
+                compressed = not compressed
+                pos += 1
+            elif compressed:
+                decoded.extend((body[pos], 0))
+                pos += 1
+            else:
+                if pos + 1 >= len(body):
+                    raise UnicodeDecodeError(
+                        "utf-16-le", body, pos, len(body),
+                        "truncated uncompressed character in Jet text")
+                decoded.extend(body[pos:pos + 2])
+                pos += 2
+        return decoded.decode("utf-16-le")
+
     @classmethod
     def decode_text_value(cls, raw):
         if not raw:
             return None
         if raw.startswith(b"\xff\xfe"):
-            s = cls._decode_mixed_segments(raw[2:])
+            s = cls._decode_compressed_unicode(raw[2:])
         elif raw.startswith(b"\xfe\xff"):
             s = cls._decode_mixed_segments(raw[2:], be=True)
         elif len(raw) % 2 == 1:
