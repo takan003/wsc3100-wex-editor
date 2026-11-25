@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from wex_editor import EditorApp, ScheduleImportDialog
-from wex_io import ScheduleRow
+from wex_io import ScheduleRow, build_insert_row
 
 
 def schedule_row(music_id, name):
@@ -196,6 +196,29 @@ class EditorTests(unittest.TestCase):
         self.assertTrue(any("[Up_music]" in s for s in sql))
         self.assertFalse(any("[Up_page]" in s for s in sql))
 
+    def test_new_rows_include_official_single_track_defaults(self):
+        self.load_project()
+        rows = [
+            dict(schedule_row(-1, "Exam one").data, Dir0="tone.wav"),
+            dict(schedule_row(-2, "Exam two").data, Dir0="tone.wav",
+                 Start_sec="07", Dir_OK="custom"),
+        ]
+        self.import_exam(("replace", 2, "Second"), rows)
+        with patch("wex_editor.build_insert_row", wraps=build_insert_row) as insert:
+            self.ws._build_statements()
+
+        inserts = [(call.args[0], call.args[1]) for call in insert.call_args_list]
+        self.assertEqual([table for table, _ in inserts],
+                         ["MUSIC2", "MUSIC_T", "MUSIC2", "MUSIC_T"])
+        for _, row in inserts:
+            for col in ("Clock_end_hour", "Clock_end_min", "Clock_end_sec",
+                        "Start_hour", "Start_min"):
+                self.assertEqual(row[col], "00")
+        self.assertEqual(inserts[0][1]["Start_sec"], "00")
+        self.assertEqual(inserts[0][1]["Dir_OK"], "1")
+        self.assertEqual(inserts[2][1]["Start_sec"], "07")
+        self.assertEqual(inserts[2][1]["Dir_OK"], "custom")
+
     def test_cancelled_import_does_not_change_the_sheet(self):
         self.load_project()
         self.ws.sheet.set_cell_data(0, 1, "Unsaved first")
@@ -211,6 +234,23 @@ class EditorTests(unittest.TestCase):
             self.import_exam(("replace", 2, "Second"), rows)
         error.assert_called_once()
         self.assertEqual(self.ws.tab_rows[2][0]["Music_name"], "Second row")
+
+    def test_invigilation_marked_end_times_are_imported(self):
+        grid = [
+            ["日期", "12月1日", "12月2日"],
+            ["星期", "星期二", "星期三"],
+            ["考試節次", "四", "四"],
+            ["結束時間1", "16:00◎", ""],
+            ["結束時間2", "", "16:10 ◎"],
+        ]
+        with patch.object(self.ws, "_pref_import_write_date", return_value=False):
+            rows = self.ws._parse_invigilation_grid(grid, "115-exam.xlsx")
+        self.assertEqual([(r["Music_name"], r["Clock_start_hour"],
+                           r["Clock_start_min"], r["Dir0"], r["Week2"], r["Week3"])
+                          for r in rows],
+                         [("12/1-4-結束", "16", "00", "03-結束鈴.mp3", True, False),
+                          ("12/2-4-結束2", "16", "10", "03-結束鈴.mp3", False, True)])
+        self.assertIsNone(self.ws._invig_to_hm("16:00其他文字"))
 
     def test_merge_keeps_different_explicit_dates(self):
         self.load_project()

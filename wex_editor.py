@@ -661,7 +661,7 @@ class Workspace(ttk.Frame):
         if hasattr(v, "hour") and hasattr(v, "minute"):
             return int(v.hour), int(v.minute)
         s = str(v).strip()
-        m = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", s)
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?\s*◎?", s)
         if not m:
             return None
         return int(m.group(1)), int(m.group(2))
@@ -2037,6 +2037,10 @@ class Workspace(ttk.Frame):
             next_id = None
             for d in new_rows:
                 row_data = dict(d)
+                for col in ("Clock_end_hour", "Clock_end_min", "Clock_end_sec",
+                            "Start_hour", "Start_min", "Start_sec"):
+                    row_data.setdefault(col, "00")
+                row_data.setdefault("Dir_OK", "1")
                 if next_id is None:
                     next_id = proj.next_music_id(table)
                 row_data["MUSIC"] = next_id
